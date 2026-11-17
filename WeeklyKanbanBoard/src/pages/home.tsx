@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { reportSnapshots } from "@/data/pdca";
+import { usePdcaSnapshots } from "@/data/pdca-store";
 
 const chartConfig = {
   completed: { label: "累计完成（件）", color: "var(--primary)" },
@@ -22,17 +22,19 @@ const fmtPct = (n: number | null) => n === null ? "未提供" : `${n.toFixed(1)}
 const shortDate = (n: number) => new Date(n).toISOString().slice(5, 10).replace("-", "/");
 
 export function HomePage() {
+  const snapshots = usePdcaSnapshots();
   const [params, setParams] = useSearchParams();
   const requested = params.get("period");
-  const selectedIndex = reportSnapshots.findIndex((r) => r.id === requested);
-  const index = selectedIndex >= 0 ? selectedIndex : reportSnapshots.length - 1;
-  const report = reportSnapshots[index];
-  const data = reportSnapshots.slice(0, index + 1);
+  const selectedIndex = snapshots.findIndex((r) => r.id === requested);
+  const index = selectedIndex >= 0 ? selectedIndex : snapshots.length - 1;
+  const report = snapshots[index];
+  const data = snapshots.slice(0, index + 1);
   const [progressView, setProgressView] = useState<"completed" | "increment">("completed");
   const [qualityView, setQualityView] = useState<"gui" | "api">("gui");
   const [detailOpen, setDetailOpen] = useState(false);
   const [rulesOpen, setRulesOpen] = useState(false);
   const choosePeriod = (id: string) => { const next = new URLSearchParams(params); next.set("period", id); setParams(next, { replace: true }); };
+  const latestId = snapshots[snapshots.length - 1].id;
   const axis = { tickLine: false, axisLine: false, tickMargin: 10 };
 
   return (
@@ -46,9 +48,9 @@ export function HomePage() {
           <label htmlFor="period-select" className="text-sm text-foreground">报告期</label>
           <Select value={report.id} onValueChange={choosePeriod}>
             <SelectTrigger id="period-select" className="w-[205px] bg-card" aria-label="选择报告期"><CalendarDays aria-hidden="true" className="size-4" /><SelectValue /></SelectTrigger>
-            <SelectContent>{[...reportSnapshots].reverse().map((r) => <SelectItem key={r.id} value={r.id}>{r.end}{r.id === reportSnapshots[reportSnapshots.length - 1].id ? " · 最新" : ""}</SelectItem>)}</SelectContent>
+            <SelectContent>{[...snapshots].reverse().map((r) => <SelectItem key={r.id} value={r.id}>{r.end}{r.id === latestId ? " · 最新" : ""}</SelectItem>)}</SelectContent>
           </Select>
-          {index !== reportSnapshots.length - 1 && <Button variant="outline" onClick={() => choosePeriod(reportSnapshots[reportSnapshots.length - 1].id)}>返回最新一期</Button>}
+          {index !== snapshots.length - 1 && <Button variant="outline" onClick={() => choosePeriod(latestId)}>返回最新一期</Button>}
         </div>
       </div>
 
@@ -157,7 +159,7 @@ export function HomePage() {
           <div><dt className="mb-2 font-semibold">统一比较</dt><dd className="leading-7">采用各期已确认总括。累计完成件数包含之前 Part，总量统一为266件，完成率为累计完成÷266。原文阶段百分比不混入总量曲线。</dd></div>
           <div><dt className="mb-2 font-semibold">报告周期</dt><dd className="leading-7">9月18日至10月8日包含假期。未提供的报告期不补零；首份文件日期为7月9日，原文周期截至7月8日。</dd></div>
           <div><dt className="mb-2 font-semibold">计划与逾期</dt><dd className="leading-7">尚未确认266件总量对应的计划件数与期限。本看板不据阶段计划百分比推算逾期率或延期天数。</dd></div>
-          <div><dt className="mb-2 font-semibold">数据版本</dt><dd className="leading-7">本版包含截至{reportSnapshots[reportSnapshots.length - 1].end}的{reportSnapshots.length}期汇总。未配置文件夹自动导入；新增周报需核对并更新发布。页面不提供数据修改功能。</dd></div>
+          <div><dt className="mb-2 font-semibold">数据版本</dt><dd className="leading-7">内置基线包含截至{snapshots[snapshots.length - 1].end}的汇总。通过页头「更新 PDCA」放入周报文档（Excel / CSV / PDF / 文本 / JSON）并确认，即可新增或替换报告期；导入数据保存在本机浏览器，可随时一键恢复内置基线。页面本身不提供数值手改。</dd></div>
         </dl></CollapsibleContent>
       </Collapsible>
     </section>
