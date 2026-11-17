@@ -1,0 +1,16 @@
+# Dependencies & build artifacts
+node_modules/
+dist/
+.vite-cache/
+
+# Logs
+*.log
+
+# Local env files
+.env
+.env.*
+!.env.example
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
