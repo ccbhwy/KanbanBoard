@@ -447,6 +447,10 @@ function parseKeyValueRows(rows: CellMatrix, warnings: string[]): ParsedDraft | 
 }
 
 function parseWorkbookRows(rows: CellMatrix, warnings: string[]): ParsedDraft[] {
+  // 0) weekly-PDCA cycle layout (Sheet1 of the Flux 評価PDCA workbook:
+  //    <Ｐ><Ｄ><Ｃ><Ａ> header row with 今週/先週 narrative blocks)
+  const cycle = parsePdcaCycleSheet(rows, warnings);
+  if (cycle.length) return cycle;
   // 1) header-table layout
   for (let i = 0; i < rows.length; i++) {
     const map = headerMapFromRow(rows[i]);
@@ -458,6 +462,207 @@ function parseWorkbookRows(rows: CellMatrix, warnings: string[]): ParsedDraft[] 
   // 2) label/value layout
   const kv = parseKeyValueRows(rows, warnings);
   return kv ? [kv] : [];
+}
+
+// ------------------------------------------------------- PDCA cycle sheet ---
+// The 週次PDCA layout is a 2×4 grid of long narrative cells: rows for 今週 /
+// 先週 under the <Ｐ><Ｄ><Ｃ><Ａ> header, plus a 総括 summary block. Metrics
+// live inside the prose as labeled lines:
+//   - 期間：2026-10-30〜2026-11-5
+//   - Playwright：266件、通過率 95.6%（実績）/100%（計画）
+//   - Playwright：161件、通過率 91.6%（実績）/90%（計画）
+//   - 通過率 100%（実績）/100%（計画）
+//   - 【KPI指標トラッキング】（2026/11/12時点）… Server：97.7% / Web：90.6% /
+//     Playwright API 実測通過率：100%
+// The summary block (総括) carries the current week's measured rates; the C
+// block repeats a tracking snapshot that may be stale, so summary wins and a
+// mismatch warning is raised.
+
+interface CycleBlock {
+  summaryText: string | null;
+  checkText: string | null;
+  actionText: string | null;
+}
+
+function splitCycleBlocks(rows: CellMatrix): CycleBlock | null {
+  // Detect the <Ｐ><Ｄ><Ｃ><Ａ> header: individual cells whose normalized
+  // value is exactly p / d / c / a (norm strips the full-width brackets).
+  // Matching whole cells avoids false positives from long title strings that
+  // merely contain those letters.
+  let headerRow = -1;
+  for (let i = 0; i < Math.min(rows.length, 12); i++) {
+    const cells = (rows[i] ?? []).map((c) => norm(c));
+    const hits = new Set(
+      cells.filter((n): n is string => n.length === 1 && "pdca".includes(n)),
+    );
+    if (hits.has("p") && hits.has("d") && hits.has("c") && hits.has("a")) {
+      headerRow = i;
+      break;
+    }
+  }
+  if (headerRow < 0) return null;
+
+  // Columns of D / C / A from the header row; P col +1 typically empty.
+  const header = rows[headerRow] ?? [];
+  let dCol = -1;
+  let cCol = -1;
+  let aCol = -1;
+  header.forEach((cell, idx) => {
+    const n = norm(cell);
+    if (n === "d" && dCol < 0) dCol = idx;
+    if (n === "c" && cCol < 0) cCol = idx;
+    if (n === "a" && aCol < 0) aCol = idx;
+  });
+  if (dCol < 0 || cCol < 0) return null;
+
+  // 総括 block: search upward rows for a cell whose text starts with 総括.
+  let summaryText: string | null = null;
+  for (let i = headerRow - 1; i >= 0; i--) {
+    const row = rows[i] ?? [];
+    for (const cell of row) {
+      if (typeof cell === "string" && cell.replace(/\s/g, "").startsWith("総括")) {
+        // The narrative usually sits in the next column of the same row.
+        const cellIdx = row.indexOf(cell);
+        summaryText =
+          typeof row[cellIdx + 1] === "string" ? (row[cellIdx + 1] as string) : (cell as string);
+        break;
+      }
+    }
+    if (summaryText) break;
+  }
+
+  // The first data row below the header is 今週 — but spacer rows (all
+  // full-width blanks) sit between the header and it, so scan for the first
+  // row whose D/C window actually carries narrative text.
+  const longestInRow = (row: CellMatrix[number], idx: number): string | null => {
+    // The narrative may be merged across adjacent cells; take the longest
+    // string in a small window starting at the header column.
+    let best: string | null = null;
+    for (let j = idx; j < Math.min(idx + 2, row.length); j++) {
+      const c = row[j];
+      if (typeof c === "string" && (!best || c.length > best.length)) best = c;
+    }
+    return best;
+  };
+  let thisWeekRow: CellMatrix[number] = [];
+  for (let i = headerRow + 1; i < rows.length && thisWeekRow.length === 0; i++) {
+    const row = rows[i] ?? [];
+    const d = longestInRow(row, dCol);
+    const c = longestInRow(row, cCol);
+    if ((d && d.length > 30) || (c && c.length > 30)) thisWeekRow = row;
+  }
+  const cellAt = (idx: number): string | null => longestInRow(thisWeekRow, idx);
+
+  return {
+    summaryText,
+    checkText: cellAt(cCol),
+    actionText: aCol >= 0 ? cellAt(aCol) : null,
+  };
+}
+
+/** Parse one 週次PDCA cycle sheet into a draft. */
+export function parsePdcaCycleSheet(rows: CellMatrix, warnings: string[]): ParsedDraft[] {
+  const blocks = splitCycleBlocks(rows);
+  if (!blocks) return [];
+
+  const draft: ParsedDraft = {};
+  const summary = blocks.summaryText ?? "";
+  const check = blocks.checkText ?? "";
+
+  // --- period from 総括: 期間：2026-10-30〜2026-11-5 (also D column) ---
+  const periodSource = `${summary}\n${check}`;
+  const period = periodSource.match(
+    /期間[：:]\s*(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})\s*[〜～~－—-]\s*(?:(\d{4})[-/.])?(\d{1,2})[-/.](\d{1,2})/,
+  );
+  if (period) {
+    const startIso = padIso(Number(period[1]), Number(period[2]), Number(period[3]));
+    const endYear = period[4] ? Number(period[4]) : Number(period[1]);
+    const endIso = padIso(endYear, Number(period[5]), Number(period[6]));
+    if (startIso) draft.start = startIso;
+    if (endIso) draft.end = endIso;
+  }
+  // 【KPI指標トラッキング】（2026/11/12時点）as a fallback / cross-check date.
+  const kpiDate = check.match(/【KPI指標トラッキング】[（(]\s*(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
+
+  // --- Server / Web / API rates from the 総括 quantitative summary ---
+  // Flux Server（GUI / 1 10.4.4.83757）
+  // - Playwright：266件、通過率 95.6%（実績）/100%（計画）で計画達成
+  // Brackets in the document are full-width; every closing bracket accepts
+  // both U+FF09 and ASCII ')' via [）)].
+  const serverBlock = summary.match(
+    /Flux\s*Server[（(][^）)]*[）)][\s\S]{0,160}?Playwright[：:]\s*(\d+)\s*件[、，]\s*通過率\s*([\d.]+)\s*%/i,
+  );
+  const webBlock = summary.match(
+    /Flux\s*Web[（(][^）)]*[）)][\s\S]{0,160}?Playwright[：:]\s*(\d+)\s*件[、，]\s*通過率\s*([\d.]+)\s*%/i,
+  );
+  const apiBlock = summary.match(
+    /Flux\s*Server[（(]\s*API[^）)]*[）)][\s\S]{0,160}?通過率\s*([\d.]+)\s*%/i,
+  );
+
+  if (serverBlock) {
+    draft.server = round1(Number(serverBlock[2]));
+    draft.serverCases = Number(serverBlock[1]);
+    draft.completed = Number(serverBlock[1]);
+  }
+  if (webBlock) {
+    draft.web = round1(Number(webBlock[2]));
+    draft.webCases = Number(webBlock[1]);
+  }
+  if (apiBlock) draft.api = round1(Number(apiBlock[1]));
+
+  // --- version: 10.4.4.83757 from the summary header lines ---
+  const version = summary.match(/\b(\d{2}\.\d{1,2}\.\d{1,5}\.\d{4,6})\b/);
+  if (version) draft.version = version[1];
+
+  // --- KPI tracking block cross-check (C column) ---
+  const kpiServer = check.match(/Server[：:]\s*([\d.]+)\s*%/);
+  const kpiWeb = check.match(/Web[：:]\s*([\d.]+)\s*%/);
+  if (kpiServer && draft.server !== undefined && Number(kpiServer[1]) !== draft.server) {
+    warnings.push(
+      `C列KPI块记录 Server ${kpiServer[1]}%，与総括实测 ${draft.server}% 不一致；已采用総括（最新实测）数值。`,
+    );
+  }
+  if (kpiWeb && draft.web !== undefined && Number(kpiWeb[1]) !== draft.web) {
+    warnings.push(
+      `C列KPI块记录 Web ${kpiWeb[1]}%，与総括实测 ${draft.web}% 不一致；已采用総括（最新实测）数值。`,
+    );
+  }
+  if (kpiDate) {
+    const iso = padIso(Number(kpiDate[1]), Number(kpiDate[2]), Number(kpiDate[3]));
+    // The 期間 line is often carried over from the previous week on copy-paste
+    // (e.g. 20261112 file still saying 〜2026-11-5); the tracking snapshot's
+    // 時点 date is written fresh each week, so the later date wins.
+    if (iso && draft.end && iso > draft.end) {
+      warnings.push(
+        `期間行（截至 ${draft.end}）疑似沿用上期，已按KPI时点 ${iso} 归档本报告期。`,
+      );
+      draft.end = iso;
+      draft.start = undefined;
+    }
+  }
+
+  // --- ⑭-style cumulative migration for completed/total (C/D column fallbacks) ---
+  // ⑭FluxServer GUIテストケース移行＜パート5＞ 100%/100% + 総テストケース数：266 完了：266
+  const migrationBlock = `${check}\n${blocks.actionText ?? ""}`.match(
+    /総テストケース数[：:]\s*(\d+)[\s\S]{0,80}?完了[：:]\s*(\d+)/,
+  );
+  if (migrationBlock && draft.completed === undefined) {
+    draft.completed = Number(migrationBlock[2]);
+    draft.total = Number(migrationBlock[1]);
+  }
+  if (draft.completed !== undefined && draft.total === undefined) {
+    // Server cases equal the unified migration total (266) in this workbook.
+    draft.total = draft.completed === 266 ? 266 : draft.completed;
+  }
+
+  if (draft.end || draft.server !== undefined) {
+    if (!draft.end) {
+      warnings.push("Sheet1 中未找到「期間：YYYY-MM-DD〜…」，无法确定报告期。");
+      return [];
+    }
+    return [draft];
+  }
+  return [];
 }
 
 function parseJsonPayload(data: unknown, warnings: string[]): ParsedDraft[] {

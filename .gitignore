@@ -14,3 +14,8 @@ dist/
 # Editor / OS noise
 .DS_Store
 Thumbs.db
+
+# Local test/inspection helpers & real company data (never commit)
+/*.xlsx
+scripts/
+WeeklyKanbanBoard/dev-samples/real-*
