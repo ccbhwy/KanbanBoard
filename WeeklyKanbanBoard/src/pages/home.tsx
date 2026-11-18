@@ -156,7 +156,7 @@ export function HomePage() {
       <Collapsible id="methodology" open={rulesOpen} onOpenChange={setRulesOpen} className="rounded-xl border border-border bg-card">
         <CollapsibleTrigger asChild><Button variant="ghost" className="h-auto w-full justify-between p-5 text-foreground"><span className="flex items-center gap-2 font-semibold"><CircleHelp aria-hidden="true" className="size-4" />口径与报告边界</span><ChevronDown aria-hidden="true" className={`size-4 transition-transform ${rulesOpen ? "rotate-180" : ""}`} /></Button></CollapsibleTrigger>
         <CollapsibleContent><dl className="grid gap-5 border-t border-border p-5 text-sm md:grid-cols-2">
-          <div><dt className="mb-2 font-semibold">统一比较</dt><dd className="leading-7">采用各期已确认总括。累计完成件数包含之前 Part，总量统一为266件，完成率为累计完成÷266。原文阶段百分比不混入总量曲线。</dd></div>
+          <div><dt className="mb-2 font-semibold">统一比较</dt><dd className="leading-7">采用各期已确认总括。累计完成件数包含之前 Part，总量以最新报告期为准（当前 {snapshots[snapshots.length - 1].total} 件），完成率为累计完成÷总量；新任务扩容时随文档更新。原文阶段百分比不混入总量曲线。</dd></div>
           <div><dt className="mb-2 font-semibold">报告周期</dt><dd className="leading-7">9月18日至10月8日包含假期。未提供的报告期不补零；首份文件日期为7月9日，原文周期截至7月8日。</dd></div>
           <div><dt className="mb-2 font-semibold">计划与逾期</dt><dd className="leading-7">尚未确认266件总量对应的计划件数与期限。本看板不据阶段计划百分比推算逾期率或延期天数。</dd></div>
           <div><dt className="mb-2 font-semibold">数据版本</dt><dd className="leading-7">内置基线包含截至{snapshots[snapshots.length - 1].end}的汇总。通过页头「更新 PDCA」放入周报文档（Excel / CSV / PDF / 文本 / JSON）并确认，即可新增或替换报告期；导入数据保存在本机浏览器，可随时一键恢复内置基线。页面本身不提供数值手改。</dd></div>

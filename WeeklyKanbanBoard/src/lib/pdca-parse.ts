@@ -480,6 +480,7 @@ function parseWorkbookRows(rows: CellMatrix, warnings: string[]): ParsedDraft[] 
 
 interface CycleBlock {
   summaryText: string | null;
+  doText: string | null;
   checkText: string | null;
   actionText: string | null;
 }
@@ -555,6 +556,7 @@ function splitCycleBlocks(rows: CellMatrix): CycleBlock | null {
 
   return {
     summaryText,
+    doText: cellAt(dCol),
     checkText: cellAt(cCol),
     actionText: aCol >= 0 ? cellAt(aCol) : null,
   };
@@ -567,7 +569,11 @@ export function parsePdcaCycleSheet(rows: CellMatrix, warnings: string[]): Parse
 
   const draft: ParsedDraft = {};
   const summary = blocks.summaryText ?? "";
+  const doText = blocks.doText ?? "";
   const check = blocks.checkText ?? "";
+  // Everything this week's row says — D/C/A narratives plus the summary — is
+  // the search space for phase markers, coverage totals and task notes.
+  const rowText = `${summary}\n${doText}\n${check}\n${blocks.actionText ?? ""}`;
 
   // --- period from 総括: 期間：2026-10-30〜2026-11-5 (also D column) ---
   const periodSource = `${summary}\n${check}`;
@@ -642,18 +648,53 @@ export function parsePdcaCycleSheet(rows: CellMatrix, warnings: string[]): Parse
   }
 
   // --- ⑭-style cumulative migration for completed/total (C/D column fallbacks) ---
-  // ⑭FluxServer GUIテストケース移行＜パート5＞ 100%/100% + 総テストケース数：266 完了：266
-  const migrationBlock = `${check}\n${blocks.actionText ?? ""}`.match(
+  // ⑭FluxServerGUI テストケース移行＜パート5＞ 100%/100% + 総テストケース数：266 完了：266
+  // When a new part widens the scope (269/280), the Coverage section's
+  // Server移行完了率 carries the new total; regression cases alone would
+  // understate it.
+  const coverageBlock = rowText.match(/Server移行完了率[：:]\s*(\d+)\s*\/\s*(\d+)/);
+  const migrationBlock = `${doText}\n${check}\n${blocks.actionText ?? ""}`.match(
     /総テストケース数[：:]\s*(\d+)[\s\S]{0,80}?完了[：:]\s*(\d+)/,
   );
   if (migrationBlock && draft.completed === undefined) {
     draft.completed = Number(migrationBlock[2]);
     draft.total = Number(migrationBlock[1]);
   }
-  if (draft.completed !== undefined && draft.total === undefined) {
-    // Server cases equal the unified migration total (266) in this workbook.
-    draft.total = draft.completed === 266 ? 266 : draft.completed;
+  if (draft.completed === undefined && coverageBlock) {
+    draft.completed = Number(coverageBlock[1]);
+    draft.total = Number(coverageBlock[2]);
   }
+  if (draft.completed !== undefined && draft.total === undefined) {
+    if (coverageBlock) draft.total = Number(coverageBlock[2]);
+    else draft.total = draft.completed === 266 ? 266 : draft.completed;
+  }
+
+  // --- phase: highest パートN / PartN mentioned in this week's row ---
+  // ⑭FluxServerGUIテストケース移行＜パート5＞ / ⑰…＜パート6＞ — when a new
+  // part (or successor task) starts, the badge follows the largest number.
+  const phaseNums = [
+    ...rowText.matchAll(/(?:パート|[Ppｐ]art)\s*([０-９0-9]+)/g),
+  ].map((m) =>
+    Number(m[1].replace(/[０-９]/g, (d) => String(d.charCodeAt(0) - 0xff10))),
+  ).filter((n) => Number.isFinite(n) && n > 0);
+  if (phaseNums.length) draft.phase = `Part${Math.max(...phaseNums)}`;
+
+  // --- new-task progress → periodNote (expansion wave, case screening) ---
+  const extras: string[] = [];
+  const wave = rowText.match(
+    /対象(?:ケース)?総数[：:]\s*(\d+)[\s\S]{0,80}?完了[：:]\s*(\d+)\s*件/,
+  );
+  if (wave) extras.push(`新任务 Wave1 自动化 ${wave[2]}/${wave[1]} 件`);
+  const screening = rowText.match(
+    /実績[／/]全体[：:]\s*(\d+)\s*\/\s*(\d+)\s*[（(]\s*実績\s*([\d.]+)\s*%\s*[）)]/,
+  );
+  if (screening) {
+    const weekly = rowText.match(/今週新規スクリーニング[：:]\s*(\d+)\s*件/);
+    extras.push(
+      `自动化筛选 ${screening[1]}/${screening[2]}（${screening[3]}%）${weekly ? `，本周新增 ${weekly[1]} 件` : ""}`,
+    );
+  }
+  if (extras.length) draft.periodNote = extras.join("；");
 
   if (draft.end || draft.server !== undefined) {
     if (!draft.end) {
