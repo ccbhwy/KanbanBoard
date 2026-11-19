@@ -3,6 +3,8 @@ import { extractText, getDocumentProxy } from "unpdf";
 
 // One parsed period, before defaults are derived from the previous period.
 // Fields left undefined were not found in the document.
+export type PdcaTrack = "migration" | "wave1";
+
 export interface ParsedDraft {
   end?: string;
   start?: string;
@@ -24,6 +26,21 @@ export interface ParsedDraft {
   webCases?: number | null;
   version?: string;
   periodNote?: string;
+  /** Which task track this period belongs to (derived from the tasks found). */
+  track?: PdcaTrack;
+  /** ⑮ Expansion Wave1 — script creation for the selected cases. */
+  wave1Completed?: number;
+  wave1Total?: number;
+  /** 予定 (planned) percent at report time, e.g. 42 for 42%. */
+  wave1PlanPercent?: number;
+  /** ⑯ FluxServerGUI テストケース自動化スクリーニング統計. */
+  screenCompleted?: number;
+  screenTotal?: number;
+  screenWeekNew?: number;
+  screenWeekPlan?: number;
+  screenDone?: number;
+  screenAutomatable?: number;
+  screenExcluded?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -71,6 +88,18 @@ const FIELD_ALIASES: Record<keyof ParsedDraft | "completedTotal", string[]> = {
   webCases: ["webgui用例", "web用例", "web用例数", "webcases", "webgui用例数"],
   version: ["评估版本", "版本", "version", "build"],
   periodNote: ["备注", "说明", "备注说明", "periodnote", "note"],
+  // Derived/task-specific fields — never matched from document labels.
+  track: [],
+  wave1Completed: [],
+  wave1Total: [],
+  wave1PlanPercent: [],
+  screenCompleted: [],
+  screenTotal: [],
+  screenWeekNew: [],
+  screenWeekPlan: [],
+  screenDone: [],
+  screenAutomatable: [],
+  screenExcluded: [],
 };
 
 // Normalized alias → field, longest first so "servergui" wins over "server".
@@ -679,19 +708,92 @@ export function parsePdcaCycleSheet(rows: CellMatrix, warnings: string[]): Parse
   ).filter((n) => Number.isFinite(n) && n > 0);
   if (phaseNums.length) draft.phase = `Part${Math.max(...phaseNums)}`;
 
-  // --- new-task progress → periodNote (expansion wave, case screening) ---
-  const extras: string[] = [];
-  const wave = rowText.match(
-    /対象(?:ケース)?総数[：:]\s*(\d+)[\s\S]{0,80}?完了[：:]\s*(\d+)\s*件/,
+  // --- ⑮ Expansion Wave1 + ⑯ case screening: structured weekly numbers ---
+  // Each task's narrative opens with a circled digit; its section runs to the
+  // next circled digit (or end of column). The D column carries this week's
+  // actuals; the C block may repeat last week's snapshot (observed 11/19:
+  // D 完了9件 vs C 完了3件 — C copies the previous D verbatim), so D wins and
+  // a mismatch warning is raised — same policy as the KPI cross-check above.
+  const taskSection = (text: string | null | undefined, marker: string): string => {
+    if (!text) return "";
+    const start = text.indexOf(marker);
+    if (start < 0) return "";
+    const rest = text.slice(start + marker.length);
+    const stop = rest.search(/[\u2460-\u2473]/);
+    return stop < 0 ? rest : rest.slice(0, stop);
+  };
+  const wave1Text = taskSection(doText, "⑮");
+  const wave1Summary = (summary ?? "").match(
+    /完了[：:]\s*(\d+)\s*\/\s*(\d+)\s+(\d+(?:\.\d+)?)\s*%\/\s*(\d+(?:\.\d+)?)\s*%（実績[／/]予定）/,
   );
-  if (wave) extras.push(`新任务 Wave1 自动化 ${wave[2]}/${wave[1]} 件`);
-  const screening = rowText.match(
+  if (wave1Text || wave1Summary) {
+    const total = wave1Text.match(/対象(?:ケース)?総数[：:]\s*(\d+)/);
+    const done = wave1Text.match(/完了[：:]\s*(\d+)\s*件/);
+    const pct = wave1Text.match(
+      /(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)\s*%（実績[／/]予定）/,
+    );
+    if (total) draft.wave1Total = Number(total[1]);
+    if (done) draft.wave1Completed = Number(done[1]);
+    if (pct) draft.wave1PlanPercent = round1(Number(pct[2]));
+    // 総括 fallback: 「完了: 9/17 52.9%/42%（実績/予定）」
+    if (wave1Summary) {
+      if (draft.wave1Completed === undefined) draft.wave1Completed = Number(wave1Summary[1]);
+      if (draft.wave1Total === undefined) draft.wave1Total = Number(wave1Summary[2]);
+      if (draft.wave1PlanPercent === undefined) draft.wave1PlanPercent = round1(Number(wave1Summary[4]));
+    }
+    const checkWave1 = taskSection(check, "⑮");
+    const checkDone = checkWave1.match(/完了[：:]\s*(\d+)\s*件/);
+    if (checkDone && draft.wave1Completed !== undefined && Number(checkDone[1]) !== draft.wave1Completed) {
+      warnings.push(
+        `C列確認块记录 Wave1 完了 ${checkDone[1]} 件，与D列实测 ${draft.wave1Completed} 件不一致（疑似沿用上期）；已采用D列数值。`,
+      );
+    }
+  }
+
+  const screeningText = taskSection(doText, "⑯") || rowText;
+  const screened = screeningText.match(
     /実績[／/]全体[：:]\s*(\d+)\s*\/\s*(\d+)\s*[（(]\s*実績\s*([\d.]+)\s*%\s*[）)]/,
   );
-  if (screening) {
-    const weekly = rowText.match(/今週新規スクリーニング[：:]\s*(\d+)\s*件/);
+  if (screened) {
+    draft.screenCompleted = Number(screened[1]);
+    draft.screenTotal = Number(screened[2]);
+  }
+  const weeklyScreen = screeningText.match(
+    /今週新規スクリーニング[：:]\s*(\d+)\s*件[（(]\s*計画\s*(\d+)\s*件/,
+  );
+  if (weeklyScreen) {
+    draft.screenWeekNew = Number(weeklyScreen[1]);
+    draft.screenWeekPlan = Number(weeklyScreen[2]);
+  } else {
+    const weekNew = screeningText.match(/今週新規スクリーニング[：:]\s*(\d+)\s*件/);
+    if (weekNew) draft.screenWeekNew = Number(weekNew[1]);
+  }
+  const screenDone = screeningText.match(/自動化済み[：:]\s*(\d+)\s*件/);
+  if (screenDone) draft.screenDone = Number(screenDone[1]);
+  const screenAuto = screeningText.match(/自動化可能[：:]\s*(\d+)\s*件/);
+  if (screenAuto) draft.screenAutomatable = Number(screenAuto[1]);
+  const screenExcluded = screeningText.match(/除外[：:]\s*(\d+)\s*件/);
+  if (screenExcluded) draft.screenExcluded = Number(screenExcluded[1]);
+
+  // A period belongs to the new-task track once it carries any Wave1 /
+  // screening number; otherwise it is a migration-era report.
+  if (
+    draft.wave1Completed !== undefined || draft.screenCompleted !== undefined
+  ) {
+    draft.track = "wave1";
+    if (!draft.phase) draft.phase = "Wave1";
+  }
+
+  // --- new-task progress → periodNote (kept human-readable) ---
+  const extras: string[] = [];
+  if (draft.wave1Completed !== undefined && draft.wave1Total !== undefined) {
     extras.push(
-      `自动化筛选 ${screening[1]}/${screening[2]}（${screening[3]}%）${weekly ? `，本周新增 ${weekly[1]} 件` : ""}`,
+      `新任务 Wave1 自动化 ${draft.wave1Completed}/${draft.wave1Total} 件${draft.wave1PlanPercent !== undefined ? `（予定 ${draft.wave1PlanPercent}%）` : ""}`,
+    );
+  }
+  if (draft.screenCompleted !== undefined && draft.screenTotal !== undefined) {
+    extras.push(
+      `自动化筛选 ${draft.screenCompleted}/${draft.screenTotal}${draft.screenWeekNew !== undefined ? `，本周新增 ${draft.screenWeekNew} 件` : ""}`,
     );
   }
   if (extras.length) draft.periodNote = extras.join("；");
@@ -704,6 +806,100 @@ export function parsePdcaCycleSheet(rows: CellMatrix, warnings: string[]): Parse
     return [draft];
   }
   return [];
+}
+
+// ------------------------------------------------- screening progress sheet ---
+// The 自动化筛选进度 companion sheet carries the same screening numbers as the
+// PDCA prose but in cells: a KPI block (label row followed by value row), a
+// label|value parameter block, and a classification table (筛选分类 | 上周 |
+// 本周新增 | 累计数量 | …). Values here win over the prose — the sheet is the
+// generated source of truth the prose was copied from.
+
+/** Parse one 自动化筛选进度 sheet into partial draft fields; null when the
+ *  sheet does not match that layout. */
+export function parseScreeningSheet(rows: CellMatrix): Partial<ParsedDraft> | null {
+  const out: Partial<ParsedDraft> = {};
+  const num = (v: unknown): number | undefined => {
+    const n = parseNumRaw(v);
+    return n === null || n === undefined ? undefined : n;
+  };
+  // KPI block: each label sits one row above its value, same column.
+  for (let i = 0; i < rows.length - 1; i++) {
+    const labels = (rows[i] ?? []).map((c) => norm(c));
+    const values = rows[i + 1] ?? [];
+    labels.forEach((label, col) => {
+      if (!label) return;
+      if (label.startsWith("累计已筛选")) {
+        const split = splitCompletedTotal(values[col]);
+        if (split.completed !== undefined) out.screenCompleted = split.completed;
+        if (split.total !== undefined) out.screenTotal = split.total;
+      } else if (label.includes("本周新增筛选")) {
+        const n = num(values[col]);
+        if (n !== undefined) out.screenWeekNew = n;
+      }
+    });
+  }
+  // 统计参数 block: label and value share a row (label | value | 口径说明).
+  for (const row of rows) {
+    if (norm(row[0]).includes("本周计划新增")) {
+      const n = num(row[1]);
+      if (n !== undefined) out.screenWeekPlan = n;
+    }
+  }
+  // Classification rows: 累计数量 is the third number after the category name.
+  const categories: Array<[RegExp, "screenDone" | "screenAutomatable" | "screenExcluded"]> = [
+    [/^已有自动化/, "screenDone"],
+    [/^可自动化/, "screenAutomatable"],
+    [/^排除/, "screenExcluded"],
+  ];
+  for (const row of rows) {
+    const first = row[0];
+    if (typeof first !== "string") continue;
+    const n = norm(first);
+    const hit = categories.find(([re]) => re.test(n));
+    if (!hit) continue;
+    const nums = row.slice(1).map(num).filter((v): v is number => v !== undefined);
+    if (nums.length >= 3) out[hit[1]] = nums[2];
+  }
+  return out.screenCompleted !== undefined || out.screenWeekNew !== undefined ||
+      out.screenDone !== undefined
+    ? out
+    : null;
+}
+
+const SCREEN_FIELD_LABELS: Record<string, string> = {
+  screenCompleted: "累计已筛选",
+  screenTotal: "用例总量",
+  screenWeekNew: "本周新增筛选",
+  screenWeekPlan: "本周计划新增",
+  screenDone: "已有自动化",
+  screenAutomatable: "可自动化",
+  screenExcluded: "排除",
+};
+
+/** Merge parsed screening-sheet values into the period draft; the sheet wins
+ *  over prose numbers, with a warning when they disagree. One workbook holds
+ *  one weekly report, so the newest draft in it is the target. */
+function mergeScreeningIntoDraft(
+  draft: ParsedDraft,
+  screening: Partial<ParsedDraft>,
+  warnings: string[],
+): void {
+  for (const [key, value] of Object.entries(screening)) {
+    if (typeof value !== "number") continue;
+    const field = key as keyof ParsedDraft;
+    const prev = draft[field];
+    if (typeof prev === "number" && prev !== value) {
+      warnings.push(
+        `「自动化筛选进度」表记录 ${SCREEN_FIELD_LABELS[key] ?? key}=${value}，与PDCA文本 ${prev} 不一致；已采用进度表数值。`,
+      );
+    }
+    (draft as Record<string, unknown>)[field] = value;
+  }
+  if (draft.track === undefined) {
+    draft.track = "wave1";
+    if (!draft.phase) draft.phase = "Wave1";
+  }
 }
 
 function parseJsonPayload(data: unknown, warnings: string[]): ParsedDraft[] {
@@ -769,13 +965,21 @@ export async function parsePdcaFile(file: File): Promise<ParseResult> {
         cellDates: true,
       });
       const drafts: ParsedDraft[] = [];
+      let screening: Partial<ParsedDraft> | null = null;
       for (const sheetName of wb.SheetNames) {
         const rows: CellMatrix = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {
           header: 1,
           raw: true,
           defval: null,
         });
+        const sheetScreening = parseScreeningSheet(rows);
+        if (sheetScreening) screening = { ...(screening ?? {}), ...sheetScreening };
         drafts.push(...parseWorkbookRows(rows, warnings));
+      }
+      if (screening && drafts.length) {
+        // One workbook = one weekly report: merge into its newest draft.
+        const latest = drafts.reduce((a, b) => ((b.end ?? "") >= (a.end ?? "") ? b : a));
+        mergeScreeningIntoDraft(latest, screening, warnings);
       }
       return { drafts, warnings, source: file.name };
     }
@@ -783,13 +987,20 @@ export async function parsePdcaFile(file: File): Promise<ParseResult> {
     if (name.endsWith(".csv")) {
       const wb = XLSX.read(await readFileText(file), { type: "string", cellDates: true, raw: false });
       const drafts: ParsedDraft[] = [];
+      let screening: Partial<ParsedDraft> | null = null;
       for (const sheetName of wb.SheetNames) {
         const rows: CellMatrix = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {
           header: 1,
           raw: true,
           defval: null,
         });
+        const sheetScreening = parseScreeningSheet(rows);
+        if (sheetScreening) screening = { ...(screening ?? {}), ...sheetScreening };
         drafts.push(...parseWorkbookRows(rows, warnings));
+      }
+      if (screening && drafts.length) {
+        const latest = drafts.reduce((a, b) => ((b.end ?? "") >= (a.end ?? "") ? b : a));
+        mergeScreeningIntoDraft(latest, screening, warnings);
       }
       return { drafts, warnings, source: file.name };
     }
@@ -813,11 +1024,19 @@ export async function parsePdcaFile(file: File): Promise<ParseResult> {
   }
 }
 
-/** Which required fields a draft is missing — drives the review UI. */
+/** Which required fields a draft is missing — drives the review UI. The
+ *  migration track needs the cumulative/total pair; the new-task track needs
+ *  at least one Wave1 or screening number instead. */
 export function draftGaps(draft: ParsedDraft): string[] {
   const gaps: string[] = [];
   if (!draft.end) gaps.push("报告期末");
-  if (draft.completed === undefined) gaps.push("累计完成");
-  if (draft.total === undefined) gaps.push("总量");
+  if (draft.track === "wave1") {
+    if (draft.wave1Completed === undefined && draft.screenCompleted === undefined) {
+      gaps.push("Wave1/筛选进度");
+    }
+  } else {
+    if (draft.completed === undefined) gaps.push("累计完成");
+    if (draft.total === undefined) gaps.push("总量");
+  }
   return gaps;
 }

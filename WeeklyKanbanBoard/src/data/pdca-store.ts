@@ -1,8 +1,8 @@
 import { useSyncExternalStore } from "react";
 import { reportSnapshots } from "@/data/pdca";
-import type { ParsedDraft } from "@/lib/pdca-parse";
+import type { ParsedDraft, PdcaTrack } from "@/lib/pdca-parse";
 
-export type { ParsedDraft };
+export type { ParsedDraft, PdcaTrack };
 
 // Mutable, application-level snapshot shape. `reportSnapshots` in
 // data/pdca.ts is the shipped baseline (readonly literal); user snapshots
@@ -14,6 +14,9 @@ export interface SnapshotRecord {
   start: string;
   end: string;
   phase: string;
+  /** Task track: "migration" = archived 266-case migration era (Part1–5),
+   *  "wave1" = the current Expansion Wave1 / screening era. */
+  track: PdcaTrack;
   completed: number;
   completionPercent: number;
   remaining: number;
@@ -34,10 +37,36 @@ export interface SnapshotRecord {
   /** end as UTC epoch ms — the charts' time axis. */
   time: number;
   serverGuiTarget: number;
+  /** ⑮ Expansion Wave1 — script creation for the selected cases. */
+  wave1Completed: number | null;
+  wave1Total: number | null;
+  /** 予定 (planned) percent at report time, e.g. 42 for 42%. */
+  wave1PlanPercent: number | null;
+  /** ⑯ FluxServerGUI テストケース自動化スクリーニング統計. */
+  screenCompleted: number | null;
+  screenTotal: number | null;
+  screenWeekNew: number | null;
+  screenWeekPlan: number | null;
+  screenDone: number | null;
+  screenAutomatable: number | null;
+  screenExcluded: number | null;
 }
 
 export const baselineSnapshots: SnapshotRecord[] = reportSnapshots.map(
-  (r) => ({ ...r }),
+  (r) => ({
+    ...r,
+    track: "track" in r ? r.track : "migration",
+    wave1Completed: "wave1Completed" in r ? r.wave1Completed : null,
+    wave1Total: "wave1Total" in r ? r.wave1Total : null,
+    wave1PlanPercent: "wave1PlanPercent" in r ? r.wave1PlanPercent : null,
+    screenCompleted: "screenCompleted" in r ? r.screenCompleted : null,
+    screenTotal: "screenTotal" in r ? r.screenTotal : null,
+    screenWeekNew: "screenWeekNew" in r ? r.screenWeekNew : null,
+    screenWeekPlan: "screenWeekPlan" in r ? r.screenWeekPlan : null,
+    screenDone: "screenDone" in r ? r.screenDone : null,
+    screenAutomatable: "screenAutomatable" in r ? r.screenAutomatable : null,
+    screenExcluded: "screenExcluded" in r ? r.screenExcluded : null,
+  }),
 );
 
 const STORAGE_KEY = "flux-pdca-user-snapshots-v1";
@@ -66,6 +95,7 @@ function coerceRecord(raw: unknown): SnapshotRecord | null {
     start: typeof r.start === "string" ? r.start : end,
     end,
     phase: typeof r.phase === "string" ? r.phase : "",
+    track: r.track === "wave1" ? "wave1" : "migration",
     completed,
     completionPercent: num(r.completionPercent, (completed / total) * 100),
     remaining: num(r.remaining, total - completed),
@@ -85,6 +115,16 @@ function coerceRecord(raw: unknown): SnapshotRecord | null {
     periodNote: typeof r.periodNote === "string" ? r.periodNote : "",
     time: num(r.time, Date.parse(end)),
     serverGuiTarget: num(r.serverGuiTarget, 90),
+    wave1Completed: numOrNull(r.wave1Completed),
+    wave1Total: numOrNull(r.wave1Total),
+    wave1PlanPercent: numOrNull(r.wave1PlanPercent),
+    screenCompleted: numOrNull(r.screenCompleted),
+    screenTotal: numOrNull(r.screenTotal),
+    screenWeekNew: numOrNull(r.screenWeekNew),
+    screenWeekPlan: numOrNull(r.screenWeekPlan),
+    screenDone: numOrNull(r.screenDone),
+    screenAutomatable: numOrNull(r.screenAutomatable),
+    screenExcluded: numOrNull(r.screenExcluded),
   };
 }
 
@@ -176,6 +216,14 @@ const nextDay = (iso: string) => {
   return new Date(t).toISOString().slice(0, 10);
 };
 
+/** Which task track a parsed period belongs to — the parser sets it once any
+ *  Wave1/screening number is found; older callers may omit it. */
+const draftTrack = (draft: ParsedDraft): PdcaTrack =>
+  draft.track ??
+  (draft.wave1Completed !== undefined || draft.screenCompleted !== undefined
+    ? "wave1"
+    : "migration");
+
 export function draftToRecord(
   draft: ParsedDraft,
   prev: SnapshotRecord | null,
@@ -185,13 +233,17 @@ export function draftToRecord(
   const completed = draft.completed;
   if (!end || total === undefined || completed === undefined) return null;
 
+  const track = draftTrack(draft);
   const time = Date.parse(end);
   const start = draft.start ?? (prev ? nextDay(prev.end) : end);
   const completionPercent =
     draft.completionPercent ?? round1((completed / total) * 100);
   const remaining = draft.remaining ?? Math.max(total - completed, 0);
+  // 迁移增量 only makes sense within the archived migration track.
   const increment =
-    draft.increment ?? (prev ? Math.max(completed - prev.completed, 0) : null);
+    track === "wave1"
+      ? null
+      : (draft.increment ?? (prev ? Math.max(completed - prev.completed, 0) : null));
   const server = draft.server ?? null;
   const serverDelta =
     server !== null && prev?.server !== undefined && prev.server !== null
@@ -208,6 +260,7 @@ export function draftToRecord(
     start,
     end,
     phase: draft.phase ?? prev?.phase ?? "",
+    track,
     completed,
     completionPercent,
     remaining,
@@ -227,6 +280,16 @@ export function draftToRecord(
     periodNote: periodNoteParts.join("；"),
     time,
     serverGuiTarget: draft.serverGuiTarget ?? prev?.serverGuiTarget ?? 90,
+    wave1Completed: draft.wave1Completed ?? null,
+    wave1Total: draft.wave1Total ?? null,
+    wave1PlanPercent: draft.wave1PlanPercent ?? null,
+    screenCompleted: draft.screenCompleted ?? null,
+    screenTotal: draft.screenTotal ?? null,
+    screenWeekNew: draft.screenWeekNew ?? null,
+    screenWeekPlan: draft.screenWeekPlan ?? null,
+    screenDone: draft.screenDone ?? null,
+    screenAutomatable: draft.screenAutomatable ?? null,
+    screenExcluded: draft.screenExcluded ?? null,
   };
 }
 
@@ -250,13 +313,15 @@ export function applyDrafts(drafts: ParsedDraft[]): {
   for (const draft of sorted) {
     const id = draft.end;
     if (!id) continue;
-    // Previous period = the latest merged record strictly before this one,
-    // taking earlier drafts of this run into account as we go.
+    // Previous period = the latest merged record of the SAME track strictly
+    // before this one (taking earlier drafts of this run into account) —
+    // archived migration totals must not leak into the new-task track.
+    const track = draftTrack(draft);
     const priorRecords = [
       ...merged,
       ...records,
     ]
-      .filter((r) => r.end < id)
+      .filter((r) => r.end < id && r.track === track)
       .sort((a, b) => a.time - b.time);
     const prev = priorRecords[priorRecords.length - 1] ?? null;
     const record = draftToRecord(draft, prev);

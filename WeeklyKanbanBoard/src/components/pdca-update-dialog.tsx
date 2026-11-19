@@ -95,14 +95,23 @@ export function PdcaUpdateDialog() {
     if (!drafts.length) return;
     const { records, replacedIds } = applyDrafts(drafts);
     const latest = records[records.length - 1];
-    toast.success(
-      `PDCA 已更新至 ${latest.end}（${latest.completed}/${latest.total} 件）`,
-      {
-        description: replacedIds.length
-          ? `已替换既有报告期：${replacedIds.join("、")}`
-          : `新增 ${records.length} 个报告期，看板已刷新。`,
-      },
-    );
+    // Headline metric follows the track: migration eras count 累计/总量,
+    // new-task eras lead with Wave1 / screening progress.
+    const parts: string[] = [];
+    if (latest.wave1Completed !== null && latest.wave1Total !== null) {
+      parts.push(`Wave1 ${latest.wave1Completed}/${latest.wave1Total}`);
+    }
+    if (latest.screenCompleted !== null && latest.screenTotal !== null) {
+      parts.push(`筛选 ${latest.screenCompleted}/${latest.screenTotal}`);
+    }
+    const headline = parts.length
+      ? parts.join(" · ")
+      : `${latest.completed}/${latest.total} 件`;
+    toast.success(`PDCA 已更新至 ${latest.end}（${headline}）`, {
+      description: replacedIds.length
+        ? `已替换既有报告期：${replacedIds.join("、")}`
+        : `新增 ${records.length} 个报告期，看板已刷新。`,
+    });
     setOpen(false);
   }, [result, selected]);
 
@@ -238,13 +247,14 @@ export function PdcaUpdateDialog() {
               </ul>
             )}
             <div className="max-h-[46vh] overflow-y-auto rounded-lg border border-border">
-              <table className="w-full min-w-[560px] text-left text-xs">
+              <table className="w-full min-w-[640px] text-left text-xs">
                 <thead className="sticky top-0 bg-muted text-foreground">
                   <tr>
                     <th scope="col" className="w-8 px-2 py-2" aria-label="选择" />
                     <th scope="col" className="px-2 py-2 font-medium">报告期末</th>
                     <th scope="col" className="px-2 py-2 font-medium">阶段</th>
                     <th scope="col" className="px-2 py-2 font-medium">累计 / 总量</th>
+                    <th scope="col" className="px-2 py-2 font-medium">新任务</th>
                     <th scope="col" className="px-2 py-2 font-medium">完成率</th>
                     <th scope="col" className="px-2 py-2 font-medium">Server</th>
                     <th scope="col" className="px-2 py-2 font-medium">Web</th>
@@ -280,6 +290,24 @@ export function PdcaUpdateDialog() {
                         <td className="px-2 py-2 tabular-nums">
                           {d.completed ?? "?"} / {d.total ?? "?"}
                         </td>
+                        <td className="px-2 py-2">
+                          {d.wave1Completed !== undefined || d.screenCompleted !== undefined ? (
+                            <span className="flex flex-wrap gap-1">
+                              {d.wave1Completed !== undefined && (
+                                <span className="whitespace-nowrap rounded border border-border bg-muted px-1.5 py-0.5 tabular-nums">
+                                  Wave1 {d.wave1Completed}/{d.wave1Total ?? "?"}
+                                </span>
+                              )}
+                              {d.screenCompleted !== undefined && (
+                                <span className="whitespace-nowrap rounded border border-border bg-muted px-1.5 py-0.5 tabular-nums">
+                                  筛选 {d.screenCompleted}/{d.screenTotal ?? "?"}{d.screenWeekNew !== undefined ? ` +${d.screenWeekNew}` : ""}
+                                </span>
+                              )}
+                            </span>
+                          ) : (
+                            "—"
+                          )}
+                        </td>
                         <td className="px-2 py-2 tabular-nums">{fmtPct(d.completionPercent)}</td>
                         <td className="px-2 py-2 tabular-nums">{fmtPct(d.server)}</td>
                         <td className="px-2 py-2 tabular-nums">{fmtPct(d.web)}</td>
@@ -293,7 +321,7 @@ export function PdcaUpdateDialog() {
             </div>
             {result.drafts.some((d) => draftGaps(d).length > 0) && (
               <p className="text-xs text-muted-foreground">
-                标记为“未识别”或缺少累计/总量的报告期无法应用，已排除在更新之外。
+                标记为“未识别”或缺少必需指标的报告期无法应用（迁移轨道：累计/总量；新任务轨道：Wave1或筛选进度），已排除在更新之外。
               </p>
             )}
           </div>
